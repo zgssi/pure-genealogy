@@ -198,6 +198,100 @@ function getLayoutedElements(
   // 计算布局
   dagre.layout(dagreGraph);
 
+// dagre 会根据内部规则重排横向位置，不能保证按排行。
+// 这里保留 dagre 的纵向层级，但强制按族谱排行重算横向 x 坐标。
+const visibleIdSet = new Set(visibleMembers.map((member) => member.id));
+
+const compareByFamilyOrder = (aId: number, bId: number) => {
+  const a = memberMap.get(aId);
+  const b = memberMap.get(bId);
+
+  const aOrder = a?.sibling_order ?? Number.MAX_SAFE_INTEGER;
+  const bOrder = b?.sibling_order ?? Number.MAX_SAFE_INTEGER;
+
+  if (aOrder !== bOrder) {
+    return aOrder - bOrder;
+  }
+
+  const aGeneration = a?.generation ?? Number.MAX_SAFE_INTEGER;
+  const bGeneration = b?.generation ?? Number.MAX_SAFE_INTEGER;
+
+  if (aGeneration !== bGeneration) {
+    return aGeneration - bGeneration;
+  }
+
+  return aId - bId;
+};
+
+const sortedChildrenMap = new Map<number, number[]>();
+
+visibleMembers.forEach((member) => {
+  const children = (childrenMap.get(member.id) || [])
+    .filter((childId) => visibleIdSet.has(childId))
+    .sort(compareByFamilyOrder);
+
+  sortedChildrenMap.set(member.id, children);
+});
+
+const subtreeWidthMap = new Map<number, number>();
+const forcedCenterXMap = new Map<number, number>();
+
+const getSubtreeWidth = (memberId: number): number => {
+  const cached = subtreeWidthMap.get(memberId);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  const children = sortedChildrenMap.get(memberId) || [];
+
+  if (children.length === 0) {
+    subtreeWidthMap.set(memberId, NODE_WIDTH);
+    return NODE_WIDTH;
+  }
+
+  const childrenWidth =
+    children.reduce((sum, childId) => sum + getSubtreeWidth(childId), 0) +
+    HORIZONTAL_GAP * (children.length - 1);
+
+  const width = Math.max(NODE_WIDTH, childrenWidth);
+  subtreeWidthMap.set(memberId, width);
+  return width;
+};
+
+const assignSubtreeX = (memberId: number, leftX: number) => {
+  const children = sortedChildrenMap.get(memberId) || [];
+  const width = getSubtreeWidth(memberId);
+
+  if (children.length === 0) {
+    forcedCenterXMap.set(memberId, leftX + width / 2);
+    return;
+  }
+
+  let childLeftX = leftX;
+
+  children.forEach((childId) => {
+    const childWidth = getSubtreeWidth(childId);
+    assignSubtreeX(childId, childLeftX);
+    childLeftX += childWidth + HORIZONTAL_GAP;
+  });
+
+  const firstChildX = forcedCenterXMap.get(children[0])!;
+  const lastChildX = forcedCenterXMap.get(children[children.length - 1])!;
+
+  forcedCenterXMap.set(memberId, (firstChildX + lastChildX) / 2);
+};
+
+let layoutCursorX = 0;
+
+roots
+  .filter((root) => visibleIdSet.has(root.id))
+  .sort((a, b) => compareByFamilyOrder(a.id, b.id))
+  .forEach((root) => {
+    const rootWidth = getSubtreeWidth(root.id);
+    assignSubtreeX(root.id, layoutCursorX);
+    layoutCursorX += rootWidth + HORIZONTAL_GAP * 2;
+  });
+
   // 4. 转换为 React Flow 节点
   let minX = Infinity;
   const generationYMap = new Map<number, { totalY: number; count: number }>();
@@ -207,7 +301,8 @@ function getLayoutedElements(
     const hasChildren = (childrenMap.get(member.id)?.length || 0) > 0;
 
     // 计算左上角位置
-    const x = nodeWithPosition.x - NODE_WIDTH / 2;
+    const forcedCenterX = forcedCenterXMap.get(member.id);
+    const x = (forcedCenterX ?? nodeWithPosition.x) - NODE_WIDTH / 2;
     const y = nodeWithPosition.y - NODE_HEIGHT / 2;
 
     // 更新全局 minX
